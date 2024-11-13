@@ -1,21 +1,9 @@
 #include <SPI.h>
 #include <LoRa.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
 
-#define SCREEN_WIDTH 128 // OLED display width, in pixels
-#define SCREEN_HEIGHT 64 // OLED display height, in pixels
-#define OLED_RESET    -1 // Reset pin # (or -1 if sharing Arduino reset pin)
-#define SCREEN_ADDRESS 0x3C // I2C address for most 128x32 or 128x64 OLEDs
-
-// Initialize the OLED display object
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-// LoRa module pins
-#define ss 5
-#define rst 2
-#define dio0 4
+#define ss 5        // LoRa SS pin
+#define rst 2       // LoRa reset pin
+#define dio0 4      // LoRa DIO0 pin
 
 // Variables to store parsed values
 int leftStickX = 0;
@@ -26,37 +14,44 @@ bool XButton = false;
 bool OButton = false;
 bool SButton = false;
 bool TButton = false;
+bool UP = false;
+bool DOWN = false;
+bool LEFT = false;
+bool RIGHT = false;
+
+int batteryLevel = 100;  // Store battery level
+unsigned long lastBatterySendTime = 0;  // Timer for battery level transmission
 
 void setup() {
-  Serial.begin(9600);
-
-  // Initialize I2C with custom pins for the OLED display
-  Wire.begin(21, 22);  // SDA = GPIO21, SCL = GPIO22 (ESP32 default I2C pins)
-
-  // Initialize OLED display with I2C address and error check
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
-    for (;;); // Stop execution if display fails to initialize
-  }
-
-  display.display(); // Display the Adafruit logo on the screen for 2 seconds
-  delay(2000);
-  display.clearDisplay(); // Clear the display
+  Serial.begin(115200);                     // Initialize Serial for debugging
+  Serial2.begin(115200, SERIAL_8N1, 16, 17); // Initialize Serial2 on RX2 = GPIO 16, TX2 = GPIO 17
 
   Serial.println("LoRa Receiver");
 
   // Initialize LoRa
-  LoRa.setPins(ss, rst, dio0); // Set LoRa pins
-  if (!LoRa.begin(433E6)) {    // Start LoRa at 433 MHz
+  LoRa.setPins(ss, rst, dio0);  // Set LoRa pins
+  if (!LoRa.begin(433E6)) {     // Start LoRa at 433 MHz
     Serial.println("Starting LoRa failed!");
-    for (;;); // Stop execution if LoRa fails to initialize
+    while (1);
   }
-
-  display.display();
-  delay(2000);
 }
 
 void loop() {
+  // Task 1: Check for LoRa packet and parse commands
+  receiveAndParseLoRa();
+
+  // Task 2: Periodically send battery level
+  sendBatteryLevel();
+
+  // Simulate battery level drain
+  batteryLevel *= 0.9999;
+  if (batteryLevel < 1) {
+    batteryLevel = 100;
+  }
+}
+
+// Function to check for LoRa packet and parse data
+void receiveAndParseLoRa() {
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
     String receivedMessage = "";
@@ -66,82 +61,86 @@ void loop() {
       receivedMessage += (char)LoRa.read();
     }
 
-    // Get RSSI (signal strength)
-    int rssi = LoRa.packetRssi();
+    // Check if message contains battery level data
+    if (receivedMessage.startsWith("BL,")) {
+      batteryLevel = receivedMessage.substring(3).toInt();
+      Serial.print("Battery Level: ");
+      Serial.println(batteryLevel);
+    } else {
+      // Parse the received message to extract control values
+      parseReceivedMessage(receivedMessage);
 
-    // Parse the received message to extract values
-    parseReceivedMessage(receivedMessage);
-
-    // Map the X and Y values to screen dimensions (0-100 to 0-128 and 0-64)
-    int mappedX = map(leftStickX, 0, 100, 0, SCREEN_HEIGHT - 23);
-    int mappedY = map(leftStickY, 0, 100, SCREEN_HEIGHT - 23, 0);
-
-    int mappedTriggerL = map(leftTrigger, 0, 255, 0, SCREEN_HEIGHT - 10);
-    int mappedTriggerR = map(rightTrigger, 0, 255, 0, SCREEN_HEIGHT - 10);
-
-    // Print received values to Serial Monitor for debugging
-    Serial.print("Received LX: ");
-    Serial.print(leftStickX);
-    Serial.print(" LY: ");
-    Serial.print(leftStickY);
-    Serial.print(" L2: ");
-    Serial.print(leftTrigger);
-    Serial.print(" R2: ");
-    Serial.print(rightTrigger);
-    Serial.print(" X: ");
-    Serial.print(XButton);
-    Serial.print(" O: ");
-    Serial.print(OButton);
-    Serial.print(" S: ");
-    Serial.print(SButton);
-    Serial.print(" T: ");
-    Serial.println(TButton);
-    Serial.print(" RSSI: ");
-    Serial.println(rssi);
-
-    // Update OLED display
-    display.clearDisplay();
-
-    // Joystick position graphic
-    display.drawCircle((SCREEN_HEIGHT / 2) + 5, (SCREEN_HEIGHT / 2) + 5, (SCREEN_HEIGHT / 2) - 6, SSD1306_WHITE);
-    display.fillCircle(13 + mappedX, 13 + mappedY, 2, SSD1306_WHITE);
-
-    display.drawRect(SCREEN_HEIGHT + 10, 10, 10, SCREEN_HEIGHT - 10, SSD1306_WHITE);
-    display.drawRect(SCREEN_HEIGHT + 25, 10, 10, SCREEN_HEIGHT - 10, SSD1306_WHITE);
-
-    int leftTop =  10 + (SCREEN_HEIGHT - 10) - mappedTriggerL;
-    int rightTop = 10 + (SCREEN_HEIGHT - 10) - mappedTriggerR;
-
-    display.fillRect(SCREEN_HEIGHT + 10, leftTop, 10, mappedTriggerL, SSD1306_WHITE);
-    display.fillRect(SCREEN_HEIGHT + 25, rightTop, 10, mappedTriggerR, SSD1306_WHITE);
-
-    display.display(); // Show content on OLED
+      // Send UP and DOWN states to another ESP32 via Serial2
+      sendCommandsOverSerial();
+    }
   }
 }
 
 // Function to parse received message and extract values
 void parseReceivedMessage(String message) {
-  int xIndex = message.indexOf("LX,");
-  int yIndex = message.indexOf(",LY,");
-  int l2Index = message.indexOf(",L2,");
-  int r2Index = message.indexOf(",R2,");
-  int xbIndex = message.indexOf(",X,");
-  int obIndex = message.indexOf(",O,");
-  int sbIndex = message.indexOf(",S,");
-  int tbIndex = message.indexOf(",T,");
+  // Split the message by commas
+  int values[12];  // There are 12 values to parse
+  int index = 0;
+  int startIndex = 0;
+  int commaIndex = 0;
 
-  if (xIndex != -1 && yIndex != -1 && l2Index != -1 && r2Index != -1 &&
-      xbIndex != -1 && obIndex != -1 && sbIndex != -1 && tbIndex != -1) {
-    // Parse values from the message
-    leftStickX = message.substring(xIndex + 3, yIndex).toInt();  // Changed +2 to +3 for "LX,"
-    leftStickY = message.substring(yIndex + 4, l2Index).toInt(); // Changed +3 to +4 for ",LY,"
-    leftTrigger = message.substring(l2Index + 4, r2Index).toInt();
-    rightTrigger = message.substring(r2Index + 4, xbIndex).toInt();
-    XButton = message.substring(xbIndex + 3, obIndex).toInt();
-    OButton = message.substring(obIndex + 3, sbIndex).toInt();
-    SButton = message.substring(sbIndex + 3, tbIndex).toInt();
-    TButton = message.substring(tbIndex + 3).toInt();
-  } else {
-    Serial.println("Parsing error: Could not find all indices in message.");
+  while (index < 12) {
+    commaIndex = message.indexOf(',', startIndex);
+    if (commaIndex == -1) {
+      // If no more commas and index is less than 11, we have a problem
+      if (index < 11) {
+        Serial.println("Parsing error: Not enough data received.");
+        return;
+      } else {
+        // Last value, take the rest of the string
+        values[index] = message.substring(startIndex).toInt();
+        break;
+      }
+    } else {
+      values[index] = message.substring(startIndex, commaIndex).toInt();
+      startIndex = commaIndex + 1;
+      index++;
+    }
+  }
+
+  // Assign parsed values to variables
+  leftStickX = values[0];
+  leftStickY = values[1];
+  leftTrigger = values[2];
+  rightTrigger = values[3];
+  XButton = values[4];
+  OButton = values[5];
+  SButton = values[6];
+  TButton = values[7];
+  UP = values[8];
+  DOWN = values[9];
+  LEFT = values[10];
+  RIGHT = values[11];
+
+  // For debugging, print the parsed values
+  Serial.printf(
+      "Received LX:%d LY:%d L2:%d R2:%d X:%d O:%d S:%d T:%d UP:%d DOWN:%d LEFT:%d RIGHT:%d\n",
+      leftStickX, leftStickY, leftTrigger, rightTrigger, XButton, OButton, SButton, TButton, UP,
+      DOWN, LEFT, RIGHT);
+}
+
+// Function to send UP and DOWN states via Serial2
+void sendCommandsOverSerial() {
+  // Send UP and DOWN button states as a string, e.g., "UP:1,DOWN:0"
+  Serial2.print("UP:");
+  Serial2.print(UP);
+  Serial2.print(",DOWN:");
+  Serial2.println(DOWN);
+}
+
+// Function to send battery level periodically
+void sendBatteryLevel() {
+  unsigned long currentTime = millis();
+  if (currentTime - lastBatterySendTime > 10000) {  // Send every 10 seconds
+    LoRa.beginPacket();
+    LoRa.print("BL,");
+    LoRa.print(batteryLevel);
+    LoRa.endPacket();
+    lastBatterySendTime = currentTime;
   }
 }

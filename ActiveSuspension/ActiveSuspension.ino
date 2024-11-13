@@ -1,9 +1,5 @@
 #include <Wire.h>
 #include <ESP32Servo.h>
-#include <Adafruit_ICM20948.h>  // Ensure this library is installed
-
-// Initialize the ICM20948 IMU
-Adafruit_ICM20948 icm;
 
 // Servo motor pins
 const int frontLeftPin = 13;
@@ -17,37 +13,21 @@ Servo frontRight;
 Servo backLeft;
 Servo backRight;
 
-// Variables for servo angles
-int frontServoAngle = 90;
-int backServoAngle = 90;
-int angleIncrement = 1;
+// Define minimum and maximum angles for the servos
+const int lowestAngle = 20;  // Lower bound for servos
+const int highestAngle = 160; // Upper bound for servos
 
-// Variables for orientation calculations (roll, pitch, yaw)
-float roll = 0, pitch = 0, yaw = 0;
-float previousTime = 0;  // Used for time delta in gyro integration
+// Rates for movement
+const int servoIncrementRate = 5;  // Rate at which servos move towards target
+const int targetIncrementRate = 5; // Rate at which target angle changes with UP/DOWN commands
 
-// Magnetometer data
-float magX, magY, magZ;
-
-// Complementary filter constants
-const float alpha = 0.98; // Weight for accelerometer vs gyroscope
-const float beta = 0.5;   // Weight for magnetometer (yaw correction)
+// Current target and position angle for all servos
+int targetAngle = 90;     // Initial target angle
+int currentAngle = 90;    // Initial position of servos
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(21, 22); // SDA = GPIO21, SCL = GPIO22
-
-  // Initialize the ICM20948 IMU
-  if (!icm.begin_I2C()) {
-    Serial.println("Failed to find ICM20948 chip");
-    while (1);
-  }
-  Serial.println("ICM20948 Found!");
-
-  // Set up IMU configurations
-  icm.setAccelRange(ICM20948_ACCEL_RANGE_4_G);
-  icm.setGyroRange(ICM20948_GYRO_RANGE_500_DPS);
-  icm.setMagDataRate(AK09916_MAG_DATARATE_100_HZ);
+  Serial2.begin(115200, SERIAL_8N1, 16, 17);  // RX2 on GPIO 16, TX2 on GPIO 17
 
   // Initialize servo motors
   ESP32PWM::allocateTimer(0);
@@ -65,72 +45,70 @@ void setup() {
   backLeft.attach(backLeftPin, 500, 2400);
   backRight.attach(backRightPin, 500, 2400);
 
-  previousTime = millis() / 1000.0;  // Initialize previousTime in seconds
+  // Set all servos to the new current angle
+  frontLeft.write(currentAngle);
+  frontRight.write(currentAngle);
+  backLeft.write(currentAngle);
+  backRight.write(currentAngle);
 }
 
 void loop() {
-  // Task 1: Read IMU data and calculate orientation
-  calculateOrientation();
+  // Task 1: Check for Serial input to adjust target angle rate
+  checkSerialInput();
 
-  // Task 2: Move servos
+  // Task 3: Move servos towards the target angle
   moveServos();
 
-  delay(10); // Small delay to prevent flooding the Serial Monitor
+  delay(10); // Small delay to control servo movement speed
 }
 
-void calculateOrientation() {
-  sensors_event_t accel;
-  sensors_event_t gyro;
-  sensors_event_t mag;
-  sensors_event_t temp;
+// Function to read Serial input and determine direction to adjust target angle
+void checkSerialInput() {
+  if (Serial2.available() > 0) {
+    String receivedData = Serial2.readStringUntil('\n');  // Read data until newline
+    
+    // Process the received data (extract UP and DOWN states)
+    int upIndex = receivedData.indexOf("UP:");
+    int downIndex = receivedData.indexOf(",DOWN:");
+    
+    if (upIndex != -1 && downIndex != -1) {
+      bool upState = receivedData.substring(upIndex + 3, downIndex).toInt();
+      bool downState = receivedData.substring(downIndex + 6).toInt();
+      
+      // Adjust target angle based on command
+      if (upState == 1) {
+        targetAngle += targetIncrementRate;
+      } else if (downState == 1) {
+        targetAngle -= targetIncrementRate;
+      }
 
-  icm.getEvent(&accel, &gyro, &temp, &mag);
-
-  // Calculate time delta
-  float currentTime = millis() / 1000.0;
-  float deltaTime = currentTime - previousTime;
-  previousTime = currentTime;
-
-  // Accelerometer-based roll and pitch calculations
-  float accelRoll = atan2(accel.acceleration.y, accel.acceleration.z) * 180.0 / PI;
-  float accelPitch = atan2(-accel.acceleration.x, sqrt(accel.acceleration.y * accel.acceleration.y + accel.acceleration.z * accel.acceleration.z)) * 180.0 / PI;
-
-  // Integrate gyroscope data to calculate yaw (Z-axis rotation)
-  yaw += gyro.gyro.z * deltaTime;
-
-  // Magnetometer-based heading (yaw adjustment)
-  float magHeading = atan2(mag.magnetic.y, mag.magnetic.x) * 180.0 / PI;
-
-  // Complementary filter for roll and pitch
-  roll = alpha * (roll + gyro.gyro.x * deltaTime) + (1 - alpha) * accelRoll;
-  pitch = alpha * (pitch + gyro.gyro.y * deltaTime) + (1 - alpha) * accelPitch;
-
-  // Adjust yaw with magnetometer data
-  yaw = (1 - beta) * yaw + beta * magHeading;
-
-  // Print calculated orientation to Serial
-  Serial.print("Roll: "); Serial.print(roll);
-  Serial.print(" Pitch: "); Serial.print(pitch);
-  Serial.print(" Yaw: "); Serial.println(yaw);
-}
-
-void moveServos() {
-  // Set front servos to the same angle within 20 to 160 degrees
-  frontLeft.write(frontServoAngle);
-  frontRight.write(frontServoAngle);
-
-  // Set back servos to the same angle within 20 to 160 degrees
-  backLeft.write(backServoAngle);
-  backRight.write(backServoAngle);
-
-  // Update front and back servo angles for the next iteration
-  frontServoAngle += angleIncrement;
-  backServoAngle += angleIncrement;
-
-  // Reverse direction if the angle exceeds the range for front and back servos
-  if (frontServoAngle >= 160 || frontServoAngle <= 20 || backServoAngle >= 160 || backServoAngle <= 20) {
-    angleIncrement = -angleIncrement; // Reverse increment direction
+      // Constrain target angle within predefined limits
+      targetAngle = constrain(targetAngle, lowestAngle, highestAngle);
+    }
   }
+}
 
-  delay(15); // Delay to control servo movement speed
+// Function to move servos gradually towards the target angle
+void moveServos() {
+  // Only move if the currentAngle is different from the targetAngle
+  if (currentAngle != targetAngle) {
+    // Determine the direction to move based on targetAngle
+    if (currentAngle > targetAngle) {
+      currentAngle -= servoIncrementRate;
+      if (currentAngle < targetAngle) currentAngle = targetAngle;  // Prevent overshooting
+    } else if (currentAngle < targetAngle) {
+      currentAngle += servoIncrementRate;
+      if (currentAngle > targetAngle) currentAngle = targetAngle;  // Prevent overshooting
+    }
+
+    // Set all servos to the new current angle
+    frontLeft.write(currentAngle);
+    frontRight.write(currentAngle);
+    backLeft.write(currentAngle);
+    backRight.write(currentAngle);
+
+    // Optional: print current angle for debugging
+    // Serial.print(" Current Angle: ");
+    // Serial.println(currentAngle);
+  }
 }
