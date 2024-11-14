@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <ESP32Servo.h>
+#include <Adafruit_BNO08x.h>
 
 // Servo motor pins
 const int mainServoPins[] = {13, 12, 14, 27}; // Pins for the main servos
@@ -21,11 +22,36 @@ const int servoIncrementRate = 1;  // Rate at which servos move towards target
 const int targetIncrementRate = 1; // Rate at which target angle changes with UP/DOWN commands
 const int steeringIncrementRate = 10;
 
+// Height setup
+const float pitchSetup = -7.00;   // Desired pitch angle to maintain
+const float rollSetup = 0.00;     // Desired roll angle to maintain
+
 // Current target and position angles for all servos
 int targetAngles[numMainServos];    // Target angles for main servos
 int currentAngles[numMainServos];   // Current positions of main servos
 int steeringAngle = 90;             // Current angle for the steering servo
 int targetSteeringAngle = 90;       // Target angle for steering servo
+
+// Sensor includes and definitions
+#include <Adafruit_BNO08x.h>
+
+Adafruit_BNO08x bno08x;
+sh2_SensorValue_t sensorValue;
+
+// Sensor report type and interval
+sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
+long reportIntervalUs = 5000;
+
+// Euler angles structure
+struct euler_t {
+  float yaw;
+  float pitch;
+  float roll;
+} ypr;
+
+// Correction factors for servo adjustments
+const float pitchCorrectionFactor = 0.5; // Adjust as necessary
+const float rollCorrectionFactor = 0.5;  // Adjust as necessary
 
 void setup() {
   Serial.begin(115200);
@@ -50,16 +76,103 @@ void setup() {
   steeringServo.setPeriodHertz(50);
   steeringServo.attach(steerPin, 500, 2400);
   steeringServo.write(steeringAngle);
+
+  // Initialize BNO08x sensor
+  if (!bno08x.begin_I2C()) {
+    Serial.println("Failed to find BNO08x chip");
+    while (1) { delay(10); }
+  }
+  // Enable sensor reports
+  setReports(reportType, reportIntervalUs);
+}
+
+// Function to set desired sensor reports
+void setReports(sh2_SensorId_t reportType, long report_interval) {
+  if (!bno08x.enableReport(reportType, report_interval)) {
+    Serial.println("Could not enable desired sensor report");
+  }
+}
+
+// Function to convert quaternion to Euler angles
+void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
+  float sqr = sq(qr);
+  float sqi = sq(qi);
+  float sqj = sq(qj);
+  float sqk = sq(qk);
+
+  ypr->yaw = atan2(2.0 * (qi * qj + qk * qr), (sqi - sqj - sqk + sqr));
+  ypr->pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
+  ypr->roll = atan2(2.0 * (qj * qk + qi * qr), (-sqi - sqj + sqk + sqr));
+
+  if (degrees) {
+    ypr->yaw *= RAD_TO_DEG;
+    ypr->pitch *= RAD_TO_DEG;
+    ypr->roll *= RAD_TO_DEG;
+  }
+}
+
+void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
+  quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
+}
+
+void quaternionToEulerGI(sh2_GyroIntegratedRV_t* rotational_vector, euler_t* ypr, bool degrees = false) {
+  quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
 }
 
 void loop() {
   // Task 1: Check for Serial input to adjust target angles and steering angle
   checkSerialInput();
 
-  // Task 2: Move servos towards their target angles
+  // Task 2: Read sensor data and adjust servos based on sensor readings
+  if (bno08x.getSensorEvent(&sensorValue)) {
+    switch (sensorValue.sensorId) {
+      case SH2_ARVR_STABILIZED_RV:
+        quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
+        break;
+      case SH2_GYRO_INTEGRATED_RV:
+        quaternionToEulerGI(&sensorValue.un.gyroIntegratedRV, &ypr, true);
+        break;
+    }
+
+    // Adjust servos based on sensor readings
+    adjustServosBasedOnSensor();
+  }
+
+  // Task 3: Move servos towards their target angles
   moveServos();
 
   delay(5); // Small delay to control servo movement speed
+}
+
+// Function to adjust servos based on pitch and roll errors
+void adjustServosBasedOnSensor() {
+  float pitchError = pitchSetup - ypr.pitch; // Desired pitch - current pitch
+  float rollError = rollSetup - ypr.roll;    // Desired roll - current roll
+
+  // Calculate adjustments
+  float pitchAdjustment = pitchError * pitchCorrectionFactor;
+  float rollAdjustment = rollError * rollCorrectionFactor;
+
+  // Adjust front servos for pitch
+  targetAngles[0] += pitchAdjustment; // Front Left
+  targetAngles[1] += pitchAdjustment; // Front Right
+
+  // Adjust back servos for pitch
+  targetAngles[2] -= pitchAdjustment; // Back Left
+  targetAngles[3] -= pitchAdjustment; // Back Right
+
+  // Adjust left servos for roll
+  targetAngles[0] += rollAdjustment; // Front Left
+  targetAngles[2] += rollAdjustment; // Back Left
+
+  // Adjust right servos for roll
+  targetAngles[1] -= rollAdjustment; // Front Right
+  targetAngles[3] -= rollAdjustment; // Back Right
+
+  // Constrain target angles within servo limits
+  for (int i = 0; i < numMainServos; i++) {
+    targetAngles[i] = constrain(targetAngles[i], lowestAngle, highestAngle);
+  }
 }
 
 // Function to read Serial input and determine directions for main servos and steering
@@ -71,13 +184,13 @@ void checkSerialInput() {
     // Verify if the message starts with the start marker '<'
     if (receivedData.startsWith("<")) {
       receivedData = receivedData.substring(1, receivedData.length() - 1); // Remove '<' and '>'
-      
+
       // Process and validate the message format and checksum
       if (isValidMessage(receivedData)) {
         // Process the message only if it is valid
         parseMessage(receivedData);
       } else {
-        Serial.println("Invalid message or checksum error!");
+        Serial.println("Invalid message or checksum error!"); // Commented out to avoid printing
       }
     }
   }
@@ -140,7 +253,7 @@ void parseMessage(String message) {
     targetSteeringAngle = map(steerValue, 0, 100, steeringMinAngle, steeringMaxAngle);
     targetSteeringAngle = constrain(targetSteeringAngle, steeringMinAngle, steeringMaxAngle);
   } else {
-    Serial.println("Parsing error: Incorrect command structure.");
+    Serial.println("Parsing error: Incorrect command structure."); // Commented out to avoid printing
   }
 }
 
