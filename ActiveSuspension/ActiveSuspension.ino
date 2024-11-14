@@ -32,6 +32,9 @@ int currentAngles[numMainServos];   // Current positions of main servos
 int steeringAngle = 90;             // Current angle for the steering servo
 int targetSteeringAngle = 90;       // Target angle for steering servo
 
+// Height offset from UP/DOWN commands
+int heightOffset = 0; // Initialize height offset
+
 // Sensor includes and definitions
 #include <Adafruit_BNO08x.h>
 
@@ -120,7 +123,7 @@ void quaternionToEulerGI(sh2_GyroIntegratedRV_t* rotational_vector, euler_t* ypr
 }
 
 void loop() {
-  // Task 1: Check for Serial input to adjust target angles and steering angle
+  // Task 1: Check for Serial input to adjust heightOffset and steering angle
   checkSerialInput();
 
   // Task 2: Read sensor data and adjust servos based on sensor readings
@@ -134,7 +137,7 @@ void loop() {
         break;
     }
 
-    // Adjust servos based on sensor readings
+    // Adjust servos based on sensor readings and heightOffset
     adjustServosBasedOnSensor();
   }
 
@@ -153,6 +156,11 @@ void adjustServosBasedOnSensor() {
   float pitchAdjustment = pitchError * pitchCorrectionFactor;
   float rollAdjustment = rollError * rollCorrectionFactor;
 
+  // Initialize target angles to a base value (e.g., 90 degrees)
+  for (int i = 0; i < numMainServos; i++) {
+    targetAngles[i] = 90;
+  }
+
   // Adjust front servos for pitch
   targetAngles[0] += pitchAdjustment; // Front Left
   targetAngles[1] += pitchAdjustment; // Front Right
@@ -169,13 +177,15 @@ void adjustServosBasedOnSensor() {
   targetAngles[1] -= rollAdjustment; // Front Right
   targetAngles[3] -= rollAdjustment; // Back Right
 
-  // Constrain target angles within servo limits
+  // Add heightOffset to all servos equally
   for (int i = 0; i < numMainServos; i++) {
+    targetAngles[i] += heightOffset;
+    // Constrain target angles within servo limits
     targetAngles[i] = constrain(targetAngles[i], lowestAngle, highestAngle);
   }
 }
 
-// Function to read Serial input and determine directions for main servos and steering
+// Function to read Serial input and determine directions for heightOffset and steering
 void checkSerialInput() {
   while (Serial2.available() > 0) {
     String receivedData = Serial2.readStringUntil('>\n'); // Read until end marker
@@ -190,7 +200,7 @@ void checkSerialInput() {
         // Process the message only if it is valid
         parseMessage(receivedData);
       } else {
-        Serial.println("Invalid message or checksum error!"); // Commented out to avoid printing
+        // Serial.println("Invalid message or checksum error!"); // Commented out to avoid printing
       }
     }
   }
@@ -236,24 +246,22 @@ void parseMessage(String message) {
     int downState = downValueStr.toInt();
     int steerValue = steerValueStr.toInt();
 
-    // Adjust target angles for main servos based on UP and DOWN commands
+    // Adjust heightOffset based on UP and DOWN commands
     if (upState == 1) {
-      for (int i = 0; i < numMainServos; i++) {
-        targetAngles[i] += targetIncrementRate;
-        targetAngles[i] = constrain(targetAngles[i], lowestAngle, highestAngle);
-      }
+      heightOffset += targetIncrementRate;
     } else if (downState == 1) {
-      for (int i = 0; i < numMainServos; i++) {
-        targetAngles[i] -= targetIncrementRate;
-        targetAngles[i] = constrain(targetAngles[i], lowestAngle, highestAngle);
-      }
+      heightOffset -= targetIncrementRate;
     }
+
+    // Ensure heightOffset doesn't cause servos to exceed their limits
+    // You may need to adjust this logic based on your servo arrangement
+    heightOffset = constrain(heightOffset, lowestAngle - 90, highestAngle - 90);
 
     // Map the steering value (leftStickX) from 0-100 to servo angle range
     targetSteeringAngle = map(steerValue, 0, 100, steeringMinAngle, steeringMaxAngle);
     targetSteeringAngle = constrain(targetSteeringAngle, steeringMinAngle, steeringMaxAngle);
   } else {
-    Serial.println("Parsing error: Incorrect command structure."); // Commented out to avoid printing
+    // Serial.println("Parsing error: Incorrect command structure."); // Commented out to avoid printing
   }
 }
 
