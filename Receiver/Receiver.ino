@@ -1,9 +1,9 @@
 #include <SPI.h>
 #include <LoRa.h>
 
-#define ss 5        // LoRa SS pin
-#define rst 2       // LoRa reset pin
-#define dio0 4      // LoRa DIO0 pin
+#define ss 5    // LoRa SS pin
+#define rst 2   // LoRa reset pin
+#define dio0 4  // LoRa DIO0 pin
 
 // Variables to store parsed values
 int leftStickX = 0;
@@ -19,20 +19,21 @@ bool DOWN = false;
 bool LEFT = false;
 bool RIGHT = false;
 
-int batteryLevel = 100;  // Store battery level
-unsigned long lastBatterySendTime = 0;  // Timer for battery level transmission
+int batteryLevel = 100;                // Store battery level
+unsigned long lastBatterySendTime = 0; // Timer for battery level transmission
 
 void setup() {
-  Serial.begin(115200);                     // Initialize Serial for debugging
-  Serial2.begin(115200, SERIAL_8N1, 16, 17); // Initialize Serial2 on RX2 = GPIO 16, TX2 = GPIO 17
+  Serial.begin(115200);                      // Initialize Serial for debugging
+  Serial2.begin(19200, SERIAL_8N1, 16, 17); // Initialize Serial2 on RX2 = GPIO 16, TX2 = GPIO 17
 
   Serial.println("LoRa Receiver");
 
   // Initialize LoRa
-  LoRa.setPins(ss, rst, dio0);  // Set LoRa pins
-  if (!LoRa.begin(433E6)) {     // Start LoRa at 433 MHz
+  LoRa.setPins(ss, rst, dio0); // Set LoRa pins
+  if (!LoRa.begin(433E6)) {    // Start LoRa at 433 MHz
     Serial.println("Starting LoRa failed!");
-    while (1);
+    while (1)
+      ;
   }
 }
 
@@ -40,14 +41,8 @@ void loop() {
   // Task 1: Check for LoRa packet and parse commands
   receiveAndParseLoRa();
 
-  // Task 2: Periodically send battery level
-  sendBatteryLevel();
-
-  // Simulate battery level drain
-  batteryLevel *= 0.9999;
-  if (batteryLevel < 1) {
-    batteryLevel = 100;
-  }
+  // Task 3: Send the UP, DOWN states and steering angle over Serial2
+  sendCommandsOverSerial();
 }
 
 // Function to check for LoRa packet and parse data
@@ -69,9 +64,6 @@ void receiveAndParseLoRa() {
     } else {
       // Parse the received message to extract control values
       parseReceivedMessage(receivedMessage);
-
-      // Send UP and DOWN states to another ESP32 via Serial2
-      sendCommandsOverSerial();
     }
   }
 }
@@ -79,7 +71,7 @@ void receiveAndParseLoRa() {
 // Function to parse received message and extract values
 void parseReceivedMessage(String message) {
   // Split the message by commas
-  int values[12];  // There are 12 values to parse
+  int values[12]; // There are 12 values to parse
   int index = 0;
   int startIndex = 0;
   int commaIndex = 0;
@@ -124,23 +116,26 @@ void parseReceivedMessage(String message) {
       DOWN, LEFT, RIGHT);
 }
 
-// Function to send UP and DOWN states via Serial2
+// Function to calculate and send the UP, DOWN states and steering angle via Serial2 with checksum
 void sendCommandsOverSerial() {
-  // Send UP and DOWN button states as a string, e.g., "UP:1,DOWN:0"
-  Serial2.print("UP:");
-  Serial2.print(UP);
-  Serial2.print(",DOWN:");
-  Serial2.println(DOWN);
-}
+  // Construct the message
+  String message = "UP:";
+  message += UP;
+  message += ",DOWN:";
+  message += DOWN;
+  message += ",STEER:";
+  message += leftStickX;
 
-// Function to send battery level periodically
-void sendBatteryLevel() {
-  unsigned long currentTime = millis();
-  if (currentTime - lastBatterySendTime > 10000) {  // Send every 10 seconds
-    LoRa.beginPacket();
-    LoRa.print("BL,");
-    LoRa.print(batteryLevel);
-    LoRa.endPacket();
-    lastBatterySendTime = currentTime;
+  // Calculate checksum (sum of ASCII values of characters in message)
+  int checksum = 0;
+  for (int i = 0; i < message.length(); i++) {
+    checksum += message[i];
   }
+  checksum %= 256; // Keep it within 0-255
+
+  // Construct the full message with start and end markers and checksum
+  String fullMessage = "<" + message + ",CHECKSUM:" + String(checksum) + ">\n";
+
+  // Send the message over Serial2
+  Serial2.print(fullMessage);
 }
