@@ -19,25 +19,31 @@ bool DOWN = false;
 bool LEFT = false;
 bool RIGHT = false;
 
-int batteryLevel = 100;                // Store battery level
+float batteryLevel = 100;                // Store battery level
 unsigned long lastBatterySendTime = 0; // Timer for battery level transmission
 
 void setup() {
   Serial.begin(115200);                      // Initialize Serial for debugging
-  Serial2.begin(19200, SERIAL_8N1, 16, 17); // Initialize Serial2 on RX2 = GPIO 16, TX2 = GPIO 17
+  Serial2.begin(19200, SERIAL_8N1, 16, 17);  // Initialize Serial2 on RX2 = GPIO 16, TX2 = GPIO 17
 
   Serial.println("LoRa Receiver");
 
   // Initialize LoRa
-  LoRa.setPins(ss, rst, dio0); // Set LoRa pins
-  if (!LoRa.begin(433E6)) {    // Start LoRa at 433 MHz
+  LoRa.setPins(ss, rst, dio0);  // Set LoRa pins
+  if (!LoRa.begin(433E6)) {     // Start LoRa at 433 MHz
     Serial.println("Starting LoRa failed!");
-    while (1)
-      ;
+    while (1);
   }
 }
 
 void loop() {
+
+  batteryLevel *= 0.9999;
+
+  if (batteryLevel < 1){
+    batteryLevel = 100;
+  }
+
   // Task 1: Check for LoRa packet and parse commands
   receiveAndParseLoRa();
 
@@ -64,6 +70,9 @@ void receiveAndParseLoRa() {
     } else {
       // Parse the received message to extract control values
       parseReceivedMessage(receivedMessage);
+
+      // Send acknowledgment back to the transmitter
+      sendAcknowledgment();
     }
   }
 }
@@ -138,4 +147,18 @@ void sendCommandsOverSerial() {
 
   // Send the message over Serial2
   Serial2.print(fullMessage);
+}
+
+// Function to send acknowledgment back to the transmitter
+void sendAcknowledgment() {
+  // Construct acknowledgment message
+  String ackMessage = "ACK,BAT:";
+  ackMessage += int(batteryLevel);
+
+  Serial.println(ackMessage);
+
+  // Send the acknowledgment over LoRa
+  LoRa.beginPacket();
+  LoRa.print(ackMessage);
+  LoRa.endPacket();
 }

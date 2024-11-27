@@ -10,13 +10,14 @@ int batteryLevel = 100;  // Initialize battery level variable
 
 void setup() {
   Serial.begin(115200);
-  PS4.begin();
+  PS4.begin();  // Initialize PS4 controller
 
   Serial.println("LoRa Sender");
 
   // Set LoRa module pins
   LoRa.setPins(ss, rst, dio0);
 
+  // Initialize LoRa at 433 MHz
   if (!LoRa.begin(433E6)) {
     Serial.println("Starting LoRa failed!");
     while (1);
@@ -25,12 +26,12 @@ void setup() {
 
 void loop() {
   if (PS4.isConnected()) {
-    sendControllerData();
-    delay(30);  // Adjust delay as needed for a faster update rate
+    sendControllerData();  // Send controller data over LoRa
+    delay(5);             // Adjust delay as needed for a faster update rate
   }
 }
 
-// Function to transmit controller data over LoRa
+// Function to transmit controller data over LoRa and handle acknowledgment
 void sendControllerData() {
   // Read and map Left Stick X and Y values from -127 to 127 range to 0 to 100
   int leftStickX = map(PS4.LStickX(), -127, 127, 0, 100);
@@ -50,7 +51,7 @@ void sendControllerData() {
   bool left = PS4.Left();
   bool right = PS4.Right();
 
-  // Send all values in a comma-separated format
+  // Send all values in a comma-separated format over LoRa
   LoRa.beginPacket();
   LoRa.print(leftStickX); LoRa.print(',');
   LoRa.print(leftStickY); LoRa.print(',');
@@ -71,4 +72,42 @@ void sendControllerData() {
                 leftStickX, leftStickY, leftTrigger, rightTrigger,
                 XButton, OButton, SButton, TButton, up, down, left, right, batteryLevel);
 
+  // Wait for acknowledgment from receiver
+  unsigned long ackTimeout = 100;     // 50ms timeout
+  unsigned long startTime = millis(); // Record the start time
+  bool ackReceived = false;          // Flag to check if acknowledgment is received
+  String ackMessage = "";            // String to store the acknowledgment message
+
+  // Loop until timeout or acknowledgment is received
+  while (millis() - startTime < ackTimeout) {
+    int packetSize = LoRa.parsePacket();
+    if (packetSize) {
+      // Read the acknowledgment packet
+      while (LoRa.available()) {
+        ackMessage += (char)LoRa.read();
+      }
+      ackReceived = true;
+      break;  // Exit the loop if acknowledgment is received
+    }
+  }
+
+  if (ackReceived) {
+    // Process the acknowledgment message
+    if (ackMessage.startsWith("ACK")) {
+      int batteryIndex = ackMessage.indexOf("BAT:");
+      if (batteryIndex != -1) {
+        // Extract battery level from the acknowledgment message
+        String batteryStr = ackMessage.substring(batteryIndex + 4);
+        batteryLevel = batteryStr.toInt();
+        Serial.print("Acknowledgment received. Battery Level: ");
+        Serial.println(batteryLevel);
+      } else {
+        Serial.println("Acknowledgment received, but no battery level found.");
+      }
+    } else {
+      Serial.println("Received unexpected message: " + ackMessage);
+    }
+  } else {
+    // Serial.println("No acknowledgment received within 50ms.");
+  }
 }
